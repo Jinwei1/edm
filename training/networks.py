@@ -461,6 +461,118 @@ class DhariwalUNet(torch.nn.Module):
         return x
 
 #----------------------------------------------------------------------------
+# Modify the above Rimplementation of the ADM architecture from the paper
+# "Diffusion Models Beat GANS on Image Synthesis". 
+
+@persistence.persistent_class
+class JinDhariwalUNet(torch.nn.Module):
+    def __init__(self,
+        img_resolution,                     # Image resolution at input/output.
+        in_channels,                        # Number of color channels at input.
+        out_channels,                       # Number of color channels at output.
+        label_dim           = 0,            # Number of class labels, 0 = unconditional.
+        augment_dim         = 0,            # Augmentation label dimensionality, 0 = no augmentation.
+
+        model_channels      = 192,          # Base multiplier for the number of channels.
+        channel_mult        = [1,2,3,4],    # Per-resolution multipliers for the number of channels.
+        channel_mult_emb    = 4,            # Multiplier for the dimensionality of the embedding vector.
+        num_blocks          = 3,            # Number of residual blocks per resolution.
+        attn_resolutions    = [32,16,8],    # List of resolutions with self-attention.
+        dropout             = 0.10,         # List of resolutions with self-attention.
+        label_dropout       = 0,            # Dropout probability of class labels for classifier-free guidance.
+    ):
+        super().__init__()
+        self.label_dropout = label_dropout
+        emb_channels = model_channels * channel_mult_emb
+        init = dict(init_mode='kaiming_uniform', init_weight=np.sqrt(1/3), init_bias=np.sqrt(1/3))
+        init_zero = dict(init_mode='kaiming_uniform', init_weight=0, init_bias=0)
+        block_kwargs = dict(emb_channels=emb_channels, channels_per_head=64, dropout=dropout, init=init, init_zero=init_zero)
+
+        # Mapping.
+        self.map_noise = PositionalEmbedding(num_channels=model_channels)
+        self.map_augment = Linear(in_features=augment_dim, out_features=model_channels, bias=False, **init_zero) if augment_dim else None
+        self.map_layer0 = Linear(in_features=model_channels, out_features=emb_channels, **init)
+        self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
+        
+        # image embedding to label embedding
+        self.conv_label1 = Conv2d(in_channels=label_dim, out_channels=label_dim, kernel=1, **init) if label_dim else None
+        self.conv_label2 = Conv2d(in_channels=label_dim, out_channels=label_dim*8, kernel=3, down=True, **init) if label_dim else None
+        self.conv_label3 = Conv2d(in_channels=label_dim*8, out_channels=label_dim*64, kernel=3, down=True, **init) if label_dim else None
+        self.conv_label4 = Conv2d(in_channels=label_dim*64, out_channels=label_dim*192, kernel=3, down=True, **init) if label_dim else None
+     
+
+        self.map_label = Linear(in_features=label_dim*192, out_features=emb_channels, bias=False, init_mode='kaiming_normal', init_weight=np.sqrt(label_dim)) if label_dim else None
+
+        # Encoder.
+        self.enc = torch.nn.ModuleDict()
+        cout = in_channels
+        for level, mult in enumerate(channel_mult):
+            res = img_resolution >> level
+            if level == 0:
+                cin = cout
+                cout = model_channels * mult
+                self.enc[f'{res}x{res}_conv'] = Conv2d(in_channels=cin, out_channels=cout, kernel=3, **init)
+            else:
+                self.enc[f'{res}x{res}_down'] = UNetBlock(in_channels=cout, out_channels=cout, down=True, **block_kwargs)
+            for idx in range(num_blocks):
+                cin = cout
+                cout = model_channels * mult
+                self.enc[f'{res}x{res}_block{idx}'] = UNetBlock(in_channels=cin, out_channels=cout, attention=(res in attn_resolutions), **block_kwargs)
+        skips = [block.out_channels for block in self.enc.values()]
+
+        # Decoder.
+        self.dec = torch.nn.ModuleDict()
+        for level, mult in reversed(list(enumerate(channel_mult))):
+            res = img_resolution >> level
+            if level == len(channel_mult) - 1:
+                self.dec[f'{res}x{res}_in0'] = UNetBlock(in_channels=cout, out_channels=cout, attention=True, **block_kwargs)
+                self.dec[f'{res}x{res}_in1'] = UNetBlock(in_channels=cout, out_channels=cout, **block_kwargs)
+            else:
+                self.dec[f'{res}x{res}_up'] = UNetBlock(in_channels=cout, out_channels=cout, up=True, **block_kwargs)
+            for idx in range(num_blocks + 1):
+                cin = cout + skips.pop()
+                cout = model_channels * mult
+                self.dec[f'{res}x{res}_block{idx}'] = UNetBlock(in_channels=cin, out_channels=cout, attention=(res in attn_resolutions), **block_kwargs)
+        self.out_norm = GroupNorm(num_channels=cout)
+        self.out_conv = Conv2d(in_channels=cout, out_channels=out_channels, kernel=3, **init_zero)
+
+    def forward(self, x, noise_labels, any_labels, augment_labels=None):
+        # Mapping.
+        emb = self.map_noise(noise_labels)
+        if self.map_augment is not None and augment_labels is not None:
+            emb = emb + self.map_augment(augment_labels)
+        emb = silu(self.map_layer0(emb))
+        emb = self.map_layer1(emb)
+        if self.map_label is not None:
+            tmp = any_labels
+
+            if self.training and self.label_dropout:
+                tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
+            tmp = self.conv_label1(tmp)
+            tmp = self.conv_label2(tmp)
+            tmp = self.conv_label3(tmp)
+            tmp = self.conv_label4(tmp)
+            tmp = torch.mean(tmp, dim=(2,3))
+            tmp = tmp.reshape(tmp.shape[0], -1)
+            emb = emb + self.map_label(tmp)
+        
+        emb = silu(emb)
+
+        # Encoder.
+        skips = []
+        for block in self.enc.values():
+            x = block(x, emb) if isinstance(block, UNetBlock) else block(x)
+            skips.append(x)
+
+        # Decoder.
+        for block in self.dec.values():
+            if x.shape[1] != block.in_channels:
+                x = torch.cat([x, skips.pop()], dim=1)
+            x = block(x, emb)
+        x = self.out_conv(silu(self.out_norm(x)))
+        return x
+    
+#----------------------------------------------------------------------------
 # Preconditioning corresponding to the variance preserving (VP) formulation
 # from the paper "Score-Based Generative Modeling through Stochastic
 # Differential Equations".
@@ -654,7 +766,8 @@ class EDMPrecond(torch.nn.Module):
     def forward(self, x, sigma, class_labels=None, force_fp32=False, **model_kwargs):
         x = x.to(torch.float32)
         sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
-        class_labels = None if self.label_dim == 0 else torch.zeros([1, self.label_dim], device=x.device) if class_labels is None else class_labels.to(torch.float32).reshape(-1, self.label_dim)
+        # class_labels = None if self.label_dim == 0 else torch.zeros([1, self.label_dim], device=x.device) if class_labels is None else class_labels.to(torch.float32).reshape(-1, self.label_dim)
+        class_labels = None if self.label_dim == 0 else torch.zeros([1, self.label_dim], device=x.device) if class_labels is None else class_labels.to(torch.float32)
         dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
 
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
@@ -662,7 +775,7 @@ class EDMPrecond(torch.nn.Module):
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.log() / 4
 
-        F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)
+        F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), any_labels=class_labels, **model_kwargs)
         assert F_x.dtype == dtype
         D_x = c_skip * x + c_out * F_x.to(torch.float32)
         return D_x

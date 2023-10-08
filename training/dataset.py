@@ -38,6 +38,7 @@ class Dataset(torch.utils.data.Dataset):
         self._use_labels = use_labels
         self._cache = cache
         self._cached_images = dict() # {raw_idx: np.ndarray, ...}
+        self._cached_labels = dict() # {raw_idx: np.ndarray, ...}
         self._raw_labels = None
         self._label_shape = None
 
@@ -53,18 +54,18 @@ class Dataset(torch.utils.data.Dataset):
             self._raw_idx = np.tile(self._raw_idx, 2)
             self._xflip = np.concatenate([self._xflip, np.ones_like(self._xflip)])
 
-    def _get_raw_labels(self):
-        if self._raw_labels is None:
-            self._raw_labels = self._load_raw_labels() if self._use_labels else None
-            if self._raw_labels is None:
-                self._raw_labels = np.zeros([self._raw_shape[0], 0], dtype=np.float32)
-            assert isinstance(self._raw_labels, np.ndarray)
-            assert self._raw_labels.shape[0] == self._raw_shape[0]
-            assert self._raw_labels.dtype in [np.float32, np.int64]
-            if self._raw_labels.dtype == np.int64:
-                assert self._raw_labels.ndim == 1
-                assert np.all(self._raw_labels >= 0)
-        return self._raw_labels
+    # def _get_raw_labels(self):
+    #     if self._raw_labels is None:
+    #         self._raw_labels = self._load_raw_labels() if self._use_labels else None
+    #         if self._raw_labels is None:
+    #             self._raw_labels = np.zeros([self._raw_shape[0], 0], dtype=np.float32)
+    #         assert isinstance(self._raw_labels, np.ndarray)
+    #         assert self._raw_labels.shape[0] == self._raw_shape[0]
+    #         assert self._raw_labels.dtype in [np.float32, np.int64]
+    #         if self._raw_labels.dtype == np.int64:
+    #             assert self._raw_labels.ndim == 1
+    #             assert np.all(self._raw_labels >= 0)
+    #     return self._raw_labels
 
     def close(self): # to be overridden by subclass
         pass
@@ -72,7 +73,7 @@ class Dataset(torch.utils.data.Dataset):
     def _load_raw_image(self, raw_idx): # to be overridden by subclass
         raise NotImplementedError
 
-    def _load_raw_labels(self): # to be overridden by subclass
+    def _load_raw_label(self): # to be overridden by subclass
         raise NotImplementedError
 
     def __getstate__(self):
@@ -90,31 +91,37 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         raw_idx = self._raw_idx[idx]
         image = self._cached_images.get(raw_idx, None)
+        label = self._cached_labels.get(raw_idx, None)
         if image is None:
             image = self._load_raw_image(raw_idx)
             if self._cache:
                 self._cached_images[raw_idx] = image
+        if label is None:
+            label = self._load_raw_label(raw_idx)
+            if self._cache:
+                self._cached_labels[raw_idx] = label
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
         assert image.dtype == np.uint8
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
-        return image.copy(), self.get_label(idx)
+            label = label[:, :, ::-1]
+        return image.copy(), label.copy()
 
-    def get_label(self, idx):
-        label = self._get_raw_labels()[self._raw_idx[idx]]
-        if label.dtype == np.int64:
-            onehot = np.zeros(self.label_shape, dtype=np.float32)
-            onehot[label] = 1
-            label = onehot
-        return label.copy()
+    # def get_label(self, idx):
+    #     label = self._get_raw_labels()[self._raw_idx[idx]]
+    #     if label.dtype == np.int64:
+    #         onehot = np.zeros(self.label_shape, dtype=np.float32)
+    #         onehot[label] = 1
+    #         label = onehot
+    #     return label.copy()
 
     def get_details(self, idx):
         d = dnnlib.EasyDict()
         d.raw_idx = int(self._raw_idx[idx])
         d.xflip = (int(self._xflip[idx]) != 0)
-        d.raw_label = self._get_raw_labels()[d.raw_idx].copy()
+        # d.raw_label = self._get_raw_labels()[d.raw_idx].copy()
         return d
 
     @property
@@ -138,23 +145,16 @@ class Dataset(torch.utils.data.Dataset):
 
     @property
     def label_shape(self):
-        if self._label_shape is None:
-            raw_labels = self._get_raw_labels()
-            if raw_labels.dtype == np.int64:
-                self._label_shape = [int(np.max(raw_labels)) + 1]
-            else:
-                self._label_shape = raw_labels.shape[1:]
-        return list(self._label_shape)
+        return list(self._raw_shape[1:])
 
     @property
     def label_dim(self):
-        assert len(self.label_shape) == 1
         return self.label_shape[0]
 
     @property
     def has_labels(self):
-        return any(x != 0 for x in self.label_shape)
-
+        # return any(x != 0 for x in self.label_shape)
+        return True
     @property
     def has_onehot_labels(self):
         return self._get_raw_labels().dtype == np.int64
@@ -233,18 +233,32 @@ class ImageFolderDataset(Dataset):
         image = image.transpose(2, 0, 1) # HWC => CHW
         return image
 
-    def _load_raw_labels(self):
-        fname = 'dataset.json'
-        if fname not in self._all_fnames:
-            return None
+    def _load_raw_label(self, raw_idx):
+        fname = self._image_fnames[raw_idx]
+        fname = fname.replace('Normal', 'Low')
         with self._open_file(fname) as f:
-            labels = json.load(f)['labels']
-        if labels is None:
-            return None
-        labels = dict(labels)
-        labels = [labels[fname.replace('\\', '/')] for fname in self._image_fnames]
-        labels = np.array(labels)
-        labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
-        return labels
+            if self._use_pyspng and pyspng is not None and self._file_ext(fname) == '.png':
+                label = pyspng.load(f.read())
+            else:
+                label = np.array(PIL.Image.open(f))
+        if label.ndim == 2:
+            label = label[:, :, np.newaxis]
+        label = label.transpose(2, 0, 1)
+        return label
+
+
+    # def _load_raw_labels(self):
+    #     fname = 'dataset.json'
+    #     if fname not in self._all_fnames:
+    #         return None
+    #     with self._open_file(fname) as f:
+    #         labels = json.load(f)['labels']
+    #     if labels is None:
+    #         return None
+    #     labels = dict(labels)
+    #     labels = [labels[fname.replace('\\', '/')] for fname in self._image_fnames]
+    #     labels = np.array(labels)
+    #     labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+    #     return labels
 
 #----------------------------------------------------------------------------

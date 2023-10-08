@@ -78,7 +78,8 @@ def training_loop(
         with torch.no_grad():
             images = torch.zeros([batch_gpu, net.img_channels, net.img_resolution, net.img_resolution], device=device)
             sigma = torch.ones([batch_gpu], device=device)
-            labels = torch.zeros([batch_gpu, net.label_dim], device=device)
+            # labels = torch.zeros([batch_gpu, net.label_dim], device=device)
+            labels = torch.zeros([batch_gpu, net.img_channels, net.img_resolution, net.img_resolution], device=device)
             misc.print_module_summary(net, [images, sigma, labels], max_nesting=2)
 
     # Setup optimizer.
@@ -126,7 +127,7 @@ def training_loop(
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 images, labels = next(dataset_iterator)
                 images = images.to(device).to(torch.float32) / 127.5 - 1
-                labels = labels.to(device)
+                labels = labels.to(device).to(torch.float32) / 127.5 - 1
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
                 training_stats.report('Loss/loss', loss)
                 loss.sum().mul(loss_scaling / batch_gpu_total).backward()

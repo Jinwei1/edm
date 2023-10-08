@@ -43,7 +43,7 @@ def parse_int_list(s):
 # Main options.
 @click.option('--outdir',        help='Where to save the results', metavar='DIR',                   type=str, required=True)
 @click.option('--data',          help='Path to the dataset', metavar='ZIP|DIR',                     type=str, required=True)
-@click.option('--cond',          help='Train class-conditional model', metavar='BOOL',              type=bool, default=False, show_default=True)
+@click.option('--cond',          help='Train Any-conditional model', metavar='BOOL',              type=bool, default=False, show_default=True)
 @click.option('--arch',          help='Network architecture', metavar='ddpmpp|ncsnpp|adm',          type=click.Choice(['ddpmpp', 'ncsnpp', 'adm']), default='ddpmpp', show_default=True)
 @click.option('--precond',       help='Preconditioning & loss function', metavar='vp|ve|edm',       type=click.Choice(['vp', 've', 'edm']), default='edm', show_default=True)
 
@@ -69,9 +69,9 @@ def parse_int_list(s):
 # I/O-related.
 @click.option('--desc',          help='String to include in result dir name', metavar='STR',        type=str)
 @click.option('--nosubdir',      help='Do not create a subdirectory for results',                   is_flag=True)
-@click.option('--tick',          help='How often to print progress', metavar='KIMG',                type=click.IntRange(min=1), default=50, show_default=True)
-@click.option('--snap',          help='How often to save snapshots', metavar='TICKS',               type=click.IntRange(min=1), default=50, show_default=True)
-@click.option('--dump',          help='How often to dump state', metavar='TICKS',                   type=click.IntRange(min=1), default=500, show_default=True)
+@click.option('--tick',          help='How often to print progress', metavar='KIMG',                type=click.IntRange(min=1), default=1, show_default=True)
+@click.option('--snap',          help='How often to save snapshots', metavar='TICKS',               type=click.IntRange(min=1), default=1, show_default=True)
+@click.option('--dump',          help='How often to dump state', metavar='TICKS',                   type=click.IntRange(min=1), default=1, show_default=True)
 @click.option('--seed',          help='Random seed  [default: random]', metavar='INT',              type=int)
 @click.option('--transfer',      help='Transfer learning from network pickle', metavar='PKL|URL',   type=str)
 @click.option('--resume',        help='Resume from previous training state', metavar='PT',          type=str)
@@ -121,7 +121,7 @@ def main(**kwargs):
         c.network_kwargs.update(channel_mult_noise=2, resample_filter=[1,3,3,1], model_channels=128, channel_mult=[2,2,2])
     else:
         assert opts.arch == 'adm'
-        c.network_kwargs.update(model_type='DhariwalUNet', model_channels=192, channel_mult=[1,2,3,4])
+        c.network_kwargs.update(model_type='JinDhariwalUNet', model_channels=192, channel_mult=[1,2,3,4])
 
     # Preconditioning & loss function.
     if opts.precond == 'vp':
@@ -204,7 +204,7 @@ def main(**kwargs):
     dist.print0()
     dist.print0(f'Output directory:        {c.run_dir}')
     dist.print0(f'Dataset path:            {c.dataset_kwargs.path}')
-    dist.print0(f'Class-conditional:       {c.dataset_kwargs.use_labels}')
+    dist.print0(f'Any-conditional:       {c.dataset_kwargs.use_labels}')
     dist.print0(f'Network architecture:    {opts.arch}')
     dist.print0(f'Preconditioning & loss:  {opts.precond}')
     dist.print0(f'Number of GPUs:          {dist.get_world_size()}')
