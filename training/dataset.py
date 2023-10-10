@@ -210,7 +210,14 @@ class ImageFolderDataset(Dataset):
         if self._type == 'zip':
             return self._get_zipfile().open(fname, 'r')
         return None
-
+    
+    def open_label_file(self, fname):
+        if self._type == 'dir':
+            return open(os.path.join(self._path.replace('Normal', 'Low'), fname), 'rb')
+        if self._type == 'zip':
+            return self._get_zipfile().open(fname, 'r')
+        return None
+    
     def close(self):
         try:
             if self._zipfile is not None:
@@ -235,8 +242,7 @@ class ImageFolderDataset(Dataset):
 
     def _load_raw_label(self, raw_idx):
         fname = self._image_fnames[raw_idx]
-        fname = fname.replace('Normal', 'Low')
-        with self._open_file(fname) as f:
+        with self.open_label_file(fname) as f:
             if self._use_pyspng and pyspng is not None and self._file_ext(fname) == '.png':
                 label = pyspng.load(f.read())
             else:
