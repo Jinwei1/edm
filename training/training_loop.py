@@ -71,7 +71,7 @@ def training_loop(
 
     # Construct network.
     dist.print0('Constructing network...')
-    interface_kwargs = dict(img_resolution=dataset_obj.resolution, img_channels=dataset_obj.num_channels, label_dim=dataset_obj.label_dim)
+    interface_kwargs = dict(img_resolution=64, img_channels=dataset_obj.num_channels, label_dim=dataset_obj.label_dim)
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
     if dist.get_rank() == 0:
@@ -126,9 +126,10 @@ def training_loop(
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 images, labels = next(dataset_iterator)
+                images = torch.nn.functional.interpolate(images.to(torch.float32), size=64, mode='bilinear', align_corners=False)
+                labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=64, mode='bilinear', align_corners=False)
                 images = images.to(device).to(torch.float32) / 127.5 - 1
                 labels = labels.to(device).to(torch.float32) / 127.5 - 1
-                print((images-labels).mean())
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
                 training_stats.report('Loss/loss', loss)
                 loss.sum().mul(loss_scaling / batch_gpu_total).backward()

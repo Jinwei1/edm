@@ -182,9 +182,12 @@ def ablation_sampler(
 class StackedRandomGenerator:
     def __init__(self, device, seeds):
         super().__init__()
+        # print(seeds)
         self.generators = [torch.Generator(device).manual_seed(int(seed) % (1 << 32)) for seed in seeds]
 
     def randn(self, size, **kwargs):
+        # print(size[0])
+        # print(len(self.generators))
         assert size[0] == len(self.generators)
         return torch.stack([torch.randn(size[1:], generator=gen, **kwargs) for gen in self.generators])
 
@@ -197,7 +200,6 @@ class StackedRandomGenerator:
 
 #----------------------------------------------------------------------------
 # Parse a comma separated list of numbers or ranges and return a list of ints.
-# Example: '1,2,5-10' returns [1, 2, 5, 6, 7, 8, 9, 10]
 
 def parse_int_list(s):
     if isinstance(s, list): return s
@@ -253,49 +255,61 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
         --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
     """
     dist.init()
-    num_batches = ((len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
-    all_batches = torch.as_tensor(seeds).tensor_split(num_batches)
-    rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
+    # num_batches = ((len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
+    # all_batches = torch.as_tensor(seeds).tensor_split(num_batches)
+    # rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
 
-    # Rank 0 goes first.
-    if dist.get_rank() != 0:
-        torch.distributed.barrier()
+    # # Rank 0 goes first.
+    # if dist.get_rank() != 0:
+    #     torch.distributed.barrier()
 
     # Load network.
     dist.print0(f'Loading network from "{network_pkl}"...')
     with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
         net = pickle.load(f)['ema'].to(device)
 
-    # Other ranks follow.
-    if dist.get_rank() == 0:
-        torch.distributed.barrier()
+    # # Other ranks follow.
+    # if dist.get_rank() == 0:
+    #     torch.distributed.barrier()
 
     # Loop over batches.
+    batch_size=2
     dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')
-    for batch_seeds in tqdm.tqdm(rank_batches, unit='batch', disable=(dist.get_rank() != 0)):
+    dataset_args = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, xflip=False, cache=False)
+    dataset_obj = dnnlib.util.construct_class_by_name(**dataset_args)
+    
+    data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=2, prefetch_factor=2)
+    # dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), shuffle=True, seed=batch_seeds[0])
+    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=None, shuffle=False,batch_size=batch_size, **data_loader_kwargs))
+    # print(len(dataset_iterator))
+    img_count=0
+  
+    for item in tqdm.tqdm(dataset_iterator, unit='batch', disable=(dist.get_rank() != 0)):
+        # print("batch_seeds:",batch_seeds)
+        # print(item)
         torch.distributed.barrier()
-        batch_size = len(batch_seeds)
+
         if batch_size == 0:
             continue
 
         # Pick latents and labels.
-        rnd = StackedRandomGenerator(device, batch_seeds)
+        batch_seeds =  [img_count+i for i in range(batch_size)]
+        rnd = StackedRandomGenerator(device,batch_seeds)
         latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+        # print(latents.shape)
         # class_labels = None
         # if net.label_dim:
         #     class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
         # if class_idx is not None:
         #     class_labels[:, :] = 0
         #     class_labels[:, class_idx] = 1
-        dataset_args = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, xflip=False, cache=False)
-        dataset_obj = dnnlib.util.construct_class_by_name(**dataset_args)
-        max_size = len(dataset_obj)
-        data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=2, prefetch_factor=2)
-        dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=batch_seeds[0])
-        dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, batch_size=batch_size, **data_loader_kwargs))
+       
+        gt_images, labels = item
+        gt_images = torch.nn.functional.interpolate(gt_images.to(torch.float32), size=64, mode='bilinear', align_corners=False)
+        labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=64, mode='bilinear', align_corners=False)
 
-        gt_images, labels = next(dataset_iterator)
         labels = labels.to(device).to(torch.float32) / 127.5 - 1
+    
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
@@ -304,21 +318,22 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
 
         # Save images.
         images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        gt_images_np = gt_images.permute(0, 2, 3, 1).cpu().numpy()
+        gt_images_np = gt_images.clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         labels_np = (labels * 127.5 + 128).clip(0,255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for seed, image_np,gt_image_np,label_np in zip(batch_seeds, images_np,gt_images_np, labels_np):
-            image_dir = os.path.join(outdir, f'{seed-seed%1000:06d}') if subdirs else outdir
+        for seed, image_np,gt_image_np,label_np in zip([batch_seeds], images_np,gt_images_np, labels_np):
+            image_dir = os.path.join(outdir, f'{img_count%1000:06d}') if subdirs else outdir
             os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{seed:06d}.png')
-            gt_image_path = os.path.join(image_dir, f'{seed:06d}-gt.png')
-            label_path = os.path.join(image_dir, f'{seed:06d}-label.png')
+            image_path = os.path.join(image_dir, f'{img_count:06d}-pred.png')
+            gt_image_path = os.path.join(image_dir, f'{img_count:06d}-gt.png')
+            label_path = os.path.join(image_dir, f'{img_count:06d}-label.png')
             if image_np.shape[2] == 1:
                 PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
             else:
                 PIL.Image.fromarray(image_np, 'RGB').save(image_path)
                 PIL.Image.fromarray(gt_image_np, 'RGB').save(gt_image_path)
                 PIL.Image.fromarray(label_np, 'RGB').save(label_path)
-                print((label_np-gt_image_np).mean())
+                # print((label_np-gt_image_np).mean())
+            img_count += 1
 
     # Done.
     torch.distributed.barrier()

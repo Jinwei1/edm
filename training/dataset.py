@@ -44,9 +44,11 @@ class Dataset(torch.utils.data.Dataset):
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
+   
         if (max_size is not None) and (self._raw_idx.size > max_size):
             np.random.RandomState(random_seed % (1 << 31)).shuffle(self._raw_idx)
             self._raw_idx = np.sort(self._raw_idx[:max_size])
+      
 
         # Apply xflip.
         self._xflip = np.zeros(self._raw_idx.size, dtype=np.uint8)
@@ -86,6 +88,7 @@ class Dataset(torch.utils.data.Dataset):
             pass
 
     def __len__(self):
+        
         return self._raw_idx.size
 
     def __getitem__(self, idx):
@@ -140,7 +143,7 @@ class Dataset(torch.utils.data.Dataset):
     @property
     def resolution(self):
         assert len(self.image_shape) == 3 # CHW
-        assert self.image_shape[1] == self.image_shape[2]
+        # assert self.image_shape[1] == self.image_shape[2]
         return self.image_shape[1]
 
     @property
@@ -187,11 +190,13 @@ class ImageFolderDataset(Dataset):
         self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
         if len(self._image_fnames) == 0:
             raise IOError('No image files found in the specified path')
-
+     
         name = os.path.splitext(os.path.basename(self._path))[0]
         raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
-        if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
-            raise IOError('Image files do not match the specified resolution')
+      
+        # if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
+        #     print(resolution,raw_shape[2], raw_shape[3])
+        #     raise IOError('Image files do not match the specified resolution')
         super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
 
     @staticmethod
@@ -242,6 +247,7 @@ class ImageFolderDataset(Dataset):
 
     def _load_raw_label(self, raw_idx):
         fname = self._image_fnames[raw_idx]
+        fname = fname.replace('normal', 'low')
         with self.open_label_file(fname) as f:
             if self._use_pyspng and pyspng is not None and self._file_ext(fname) == '.png':
                 label = pyspng.load(f.read())

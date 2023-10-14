@@ -267,14 +267,14 @@ class JinSongUNet(torch.nn.Module):
 
         # Mapping.
         self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if embedding_type == 'positional' else FourierEmbedding(num_channels=noise_channels)
-        self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
+        # self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
         self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
         self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
 
         # Encoder.
         self.enc = torch.nn.ModuleDict()
-        cout = in_channels
+        cout = 6 # in_channels
         caux = in_channels
         for level, mult in enumerate(channel_mult):
             res = img_resolution >> level
@@ -317,15 +317,16 @@ class JinSongUNet(torch.nn.Module):
                 self.dec[f'{res}x{res}_aux_norm'] = GroupNorm(num_channels=cout, eps=1e-6)
                 self.dec[f'{res}x{res}_aux_conv'] = Conv2d(in_channels=cout, out_channels=out_channels, kernel=3, **init_zero)
 
-    def forward(self, x, noise_labels, class_labels, augment_labels=None):
+    def forward(self, x, noise_labels, any_labels, augment_labels=None):
         # Mapping.
         emb = self.map_noise(noise_labels)
         emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
-        if self.map_label is not None:
-            tmp = class_labels
+        if True:
+            tmp = any_labels
             if self.training and self.label_dropout:
-                tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
-            emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
+                tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(x.dtype)
+            # emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
+            tmp = tmp.to(x.dtype)
         if self.map_augment is not None and augment_labels is not None:
             emb = emb + self.map_augment(augment_labels)
         emb = silu(self.map_layer0(emb))
@@ -333,6 +334,7 @@ class JinSongUNet(torch.nn.Module):
 
         # Encoder.
         skips = []
+        x = torch.cat([x, tmp], dim=1)
         aux = x
         for name, block in self.enc.items():
             if 'aux_down' in name:
