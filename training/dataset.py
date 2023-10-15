@@ -14,12 +14,39 @@ import PIL.Image
 import json
 import torch
 import dnnlib
-
+import glob
+import torchvision.transforms as transforms
 try:
     import pyspng
 except ImportError:
     pyspng = None
 
+
+
+# a torch dataset class for low light dataset
+class LowLightDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir, transform=transforms.ToTensor()):
+        self.low_img_list = glob.glob(data_dir.replace('Normal','Low') + '/*.png')
+        self.high_img_list = glob.glob(data_dir + '/*.png')
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.low_img_list)
+    
+    def __getitem__(self, idx):
+        # print(self.high_img_list[idx])
+        low_img = PIL.Image.open(self.low_img_list[idx])
+        high_img = PIL.Image.open(self.high_img_list[idx])
+        if self.transform:
+            low_img = self.transform(low_img)
+            high_img = self.transform(high_img)
+        else:
+            # torch load image as [C, H, W] tensor
+            low_img = torch.from_numpy(np.array(low_img)).float()
+            high_img = torch.from_numpy(np.array(high_img)).float()
+        
+        return high_img,low_img
+    
 #----------------------------------------------------------------------------
 # Abstract base class for datasets.
 

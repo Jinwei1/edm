@@ -19,6 +19,8 @@ import PIL.Image
 import dnnlib
 from torch_utils import distributed as dist
 from torch_utils import misc
+import torchvision.transforms as transforms
+
 #----------------------------------------------------------------------------
 # Proposed EDM sampler (Algorithm 2).
 
@@ -273,27 +275,37 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
     #     torch.distributed.barrier()
 
     # Loop over batches.
-    batch_size=2
+    batch_size=max_batch_size
     dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')
-    dataset_args = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, xflip=False, cache=False)
+    # dataset_args = dnnlib.EasyDict(class_name='training.dataset.LowLightDataset', data_dir=data,transform=transforms.Compose([transforms.Resize((64, 64)),
+    #                                                     transforms.ToTensor()]))
+    dataset_args = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True,xflip=False, cache=False)
     dataset_obj = dnnlib.util.construct_class_by_name(**dataset_args)
     
-    data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=2, prefetch_factor=2)
+    # data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=2, prefetch_factor=2)
     # dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), shuffle=True, seed=batch_seeds[0])
-    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=None, shuffle=False,batch_size=batch_size, **data_loader_kwargs))
+    # dataset_iterator = torch.utils.data.DataLoader(dataset=dataset_obj, sampler=None, shuffle=False,batch_size=batch_size, **data_loader_kwargs)
+    dataloader = torch.utils.data.DataLoader(dataset_obj, batch_size=batch_size, shuffle=False, num_workers=1,drop_last=False)
     # print(len(dataset_iterator))
     img_count=0
-  
-    for item in tqdm.tqdm(dataset_iterator, unit='batch', disable=(dist.get_rank() != 0)):
+    
+    psnr_list=[]
+    last_gt = 0
+    for item in tqdm.tqdm(dataloader, unit='batch', disable=(dist.get_rank() != 0)):
+    # for item in dataloader:
         # print("batch_seeds:",batch_seeds)
         # print(item)
-        torch.distributed.barrier()
+        # torch.distributed.barrier()
 
         if batch_size == 0:
             continue
-
+        
+        gt_images, labels = item
+        # gt_images = gt_images*255.
+        # labels = labels*255.
+        # print(gt_images)
         # Pick latents and labels.
-        batch_seeds =  [img_count+i for i in range(batch_size)]
+        batch_seeds =  [img_count+i for i in range(len(gt_images))]
         rnd = StackedRandomGenerator(device,batch_seeds)
         latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
         # print(latents.shape)
@@ -304,28 +316,36 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
         #     class_labels[:, :] = 0
         #     class_labels[:, class_idx] = 1
        
-        gt_images, labels = item
+        
+        # print("last_gt distance", torch.mean(gt_images.to(torch.float32)-last_gt))
+        last_gt = gt_images
         gt_images = torch.nn.functional.interpolate(gt_images.to(torch.float32), size=64, mode='bilinear', align_corners=False)
         labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=64, mode='bilinear', align_corners=False)
 
         labels = labels.to(device).to(torch.float32) / 127.5 - 1
-    
+        gt_images = gt_images.to(device).to(torch.float32) 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
         images = sampler_fn(net, latents, labels, randn_like=rnd.randn_like, **sampler_kwargs)
-
+        
+        preds = (images * 127.5 + 128).clip(0, 255)
+        mse = torch.mean((preds-gt_images)**2)
+        psnr = 10*torch.log10(255*255/mse)
+        psnr_list.append(psnr)
         # Save images.
-        images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        gt_images_np = gt_images.clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        images_np = preds.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        gt_images_np = gt_images.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         labels_np = (labels * 127.5 + 128).clip(0,255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for seed, image_np,gt_image_np,label_np in zip([batch_seeds], images_np,gt_images_np, labels_np):
-            image_dir = os.path.join(outdir, f'{img_count%1000:06d}') if subdirs else outdir
+        print("batch_seeds",batch_seeds)
+        print("img_count",img_count)
+        for seed, image_np,gt_image_np,label_np in zip(batch_seeds, images_np,gt_images_np, labels_np):
+            image_dir = os.path.join(outdir, f'{seed:06d}') if subdirs else outdir
             os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{img_count:06d}-pred.png')
-            gt_image_path = os.path.join(image_dir, f'{img_count:06d}-gt.png')
-            label_path = os.path.join(image_dir, f'{img_count:06d}-label.png')
+            image_path = os.path.join(image_dir, f'{seed:06d}-predTR.png')
+            gt_image_path = os.path.join(image_dir, f'{seed:06d}-gt.png')
+            label_path = os.path.join(image_dir, f'{seed:06d}-label.png')
             if image_np.shape[2] == 1:
                 PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
             else:
@@ -333,8 +353,10 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
                 PIL.Image.fromarray(gt_image_np, 'RGB').save(gt_image_path)
                 PIL.Image.fromarray(label_np, 'RGB').save(label_path)
                 # print((label_np-gt_image_np).mean())
-            img_count += 1
+        img_count += batch_size
 
+    mean_psnr = torch.mean(torch.stack(psnr_list))
+    print(f"mean_psnr:{mean_psnr}")
     # Done.
     torch.distributed.barrier()
     dist.print0('Done.')
