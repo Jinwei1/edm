@@ -31,6 +31,7 @@ def training_loop(
     optimizer_kwargs    = {},       # Options for optimizer.
     augment_kwargs      = None,     # Options for augmentation pipeline, None = disable.
     seed                = 0,        # Global random seed.
+    resize_resolution   = -1,      # Resolution of images for training.
     batch_size          = 512,      # Total batch size for one training iteration.
     batch_gpu           = None,     # Limit batch size per GPU, None = no limit.
     total_kimg          = 200000,   # Training duration, measured in thousands of training images.
@@ -126,8 +127,8 @@ def training_loop(
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
                 images, labels = next(dataset_iterator)
-                images = torch.nn.functional.interpolate(images.to(torch.float32), size=64, mode='bilinear', align_corners=False)
-                labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=64, mode='bilinear', align_corners=False)
+                images = torch.nn.functional.interpolate(images.to(torch.float32), size=resize_resolution, mode='bilinear', align_corners=False)
+                labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=resize_resolution, mode='bilinear', align_corners=False)
                 images = images.to(device).to(torch.float32) / 127.5 - 1
                 labels = labels.to(device).to(torch.float32) / 127.5 - 1
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
