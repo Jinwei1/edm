@@ -30,6 +30,7 @@ def training_loop(
     loss_kwargs         = {},       # Options for loss function.
     optimizer_kwargs    = {},       # Options for optimizer.
     augment_kwargs      = None,     # Options for augmentation pipeline, None = disable.
+    gamma_correction    = None,        # Apply gamma correction to labels.
     seed                = 0,        # Global random seed.
     resize_resolution   = -1,      # Resolution of images for training.
     batch_size          = 512,      # Total batch size for one training iteration.
@@ -72,7 +73,7 @@ def training_loop(
 
     # Construct network.
     dist.print0('Constructing network...')
-    interface_kwargs = dict(img_resolution=64, img_channels=dataset_obj.num_channels, label_dim=dataset_obj.label_dim)
+    interface_kwargs = dict(img_resolution=resize_resolution, img_channels=dataset_obj.num_channels, label_dim=dataset_obj.label_dim)
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
     if dist.get_rank() == 0:
@@ -130,7 +131,11 @@ def training_loop(
                 images = torch.nn.functional.interpolate(images.to(torch.float32), size=resize_resolution, mode='bilinear', align_corners=False)
                 labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=resize_resolution, mode='bilinear', align_corners=False)
                 images = images.to(device).to(torch.float32) / 127.5 - 1
-                labels = labels.to(device).to(torch.float32) / 127.5 - 1
+                if gamma_correction:
+                    labels = labels.to(device).to(torch.float32) /255.0
+                    labels = torch.pow(labels, 1/gamma_correction) * 2.0 - 1.0
+                else:
+                    labels = labels.to(device).to(torch.float32) / 127.5 - 1
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
                 training_stats.report('Loss/loss', loss)
                 loss.sum().mul(loss_scaling / batch_gpu_total).backward()

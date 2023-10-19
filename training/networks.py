@@ -219,6 +219,27 @@ class FourierEmbedding(torch.nn.Module):
         x = torch.cat([x.cos(), x.sin()], dim=1)
         return x
 
+
+#----------------------------------------------------------------------------
+# Simple Time Considered Tone Mapping Block or 4D-LUT structure for color adjustment
+# used in the UNet architecture.
+
+@persistence.persistent_class
+class TimedToneMappingBlock(torch.nn.Module):
+    def __init__(self, num_channels, scale=16):
+        super().__init__()
+        self.Conv_3x3 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=3, bias=True, up=False, down=False,
+                                resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
+        self.Conv_1x1 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=1, bias=True, up=False, down=False, 
+                             resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
+        
+    def forward(self, x, t_embeded):
+        x = self.Conv_3x3(x)
+        t_embeded
+
+        return x
+
+
 #----------------------------------------------------------------------------
 # Reimplementation of the DDPM++ and NCSN++ architectures from the paper
 # "Score-Based Generative Modeling through Stochastic Differential

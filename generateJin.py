@@ -220,11 +220,13 @@ def parse_int_list(s):
 @click.command()
 @click.option('--network', 'network_pkl',  help='Network pickle filename', metavar='PATH|URL',                      type=str, required=True)
 @click.option('--outdir',                  help='Where to save the output images', metavar='DIR',                   type=str, required=True)
-@click.option('--data',          help='Path to the dataset', metavar='ZIP|DIR',                     type=str, required=True)
+@click.option('--data',                    help='Path to the dataset', metavar='ZIP|DIR',                           type=str, required=True)
 @click.option('--seeds',                   help='Random seeds (e.g. 1,2,5-10)', metavar='LIST',                     type=parse_int_list, default='0-63', show_default=True)
 @click.option('--subdirs',                 help='Create subdirectory for every 1000 seeds',                         is_flag=True)
 @click.option('--class', 'class_idx',      help='Class label  [default: random]', metavar='INT',                    type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size', help='Maximum batch size', metavar='INT',                                type=click.IntRange(min=1), default=1, show_default=True)
+@click.option('--resize-res',              help='Resize resolution', metavar='INT',                                 type=click.IntRange(min=-1), default=-1, show_default=True)
+@click.option('--gamma_correction','--gamma',         help='EMA half-life', metavar='MIMG',                         type=click.FloatRange(min=0), default=1, show_default=True)
 
 @click.option('--steps', 'num_steps',      help='Number of sampling steps', metavar='INT',                          type=click.IntRange(min=1), default=18, show_default=True)
 @click.option('--sigma_min',               help='Lowest noise level  [default: varies]', metavar='FLOAT',           type=click.FloatRange(min=0, min_open=True))
@@ -240,7 +242,7 @@ def parse_int_list(s):
 @click.option('--schedule',                help='Ablate noise schedule sigma(t)', metavar='vp|ve|linear',           type=click.Choice(['vp', 've', 'linear']))
 @click.option('--scaling',                 help='Ablate signal scaling s(t)', metavar='vp|none',                    type=click.Choice(['vp', 'none']))
 
-def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
+def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, class_idx, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -273,7 +275,7 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
     # # Other ranks follow.
     # if dist.get_rank() == 0:
     #     torch.distributed.barrier()
-
+    img_resolution = resize_res
     # Loop over batches.
     batch_size=max_batch_size
     dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')
@@ -307,8 +309,8 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
         # Pick latents and labels.
         batch_seeds =  [img_count+i for i in range(len(gt_images))]
         rnd = StackedRandomGenerator(device,batch_seeds)
-        latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
-        # print(latents.shape)
+        latents = rnd.randn([len(batch_seeds), net.img_channels, img_resolution,img_resolution], device=device)
+        # print(net.img_resolution)
         # class_labels = None
         # if net.label_dim:
         #     class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
@@ -319,10 +321,14 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
         
         # print("last_gt distance", torch.mean(gt_images.to(torch.float32)-last_gt))
         last_gt = gt_images
-        gt_images = torch.nn.functional.interpolate(gt_images.to(torch.float32), size=64, mode='bilinear', align_corners=False)
-        labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=64, mode='bilinear', align_corners=False)
+        gt_images = torch.nn.functional.interpolate(gt_images.to(torch.float32), size=img_resolution, mode='bilinear', align_corners=False)
+        labels = torch.nn.functional.interpolate(labels.to(torch.float32), size=img_resolution, mode='bilinear', align_corners=False)
 
-        labels = labels.to(device).to(torch.float32) / 127.5 - 1
+        if gamma_correction:
+                    labels = labels.to(device).to(torch.float32) /255.0
+                    labels = torch.pow(labels, 1/gamma_correction) * 2.0 - 1.0
+        else:
+            labels = labels.to(device).to(torch.float32) / 127.5 - 1
         gt_images = gt_images.to(device).to(torch.float32) 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
@@ -331,7 +337,7 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
         images = sampler_fn(net, latents, labels, randn_like=rnd.randn_like, **sampler_kwargs)
         
         preds = (images * 127.5 + 128).clip(0, 255)
-        mse = torch.mean((preds-gt_images)**2)
+        mse = torch.mean((preds-gt_images)**2,dim=(1,2,3))
         psnr = 10*torch.log10(255*255/mse)
         psnr_list.append(psnr)
         # Save images.
@@ -355,6 +361,7 @@ def main(network_pkl, outdir, data, subdirs, seeds, class_idx, max_batch_size, d
                 # print((label_np-gt_image_np).mean())
         img_count += batch_size
 
+    print(torch.stack(psnr_list))
     mean_psnr = torch.mean(torch.stack(psnr_list))
     print(f"mean_psnr:{mean_psnr}")
     # Done.
