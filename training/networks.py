@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch_utils import persistence
 from torch.nn.functional import silu
-
+import torchvision
 #----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
 
@@ -221,25 +221,54 @@ class FourierEmbedding(torch.nn.Module):
 
 
 #----------------------------------------------------------------------------
-# Simple Time Considered Tone Mapping Block or 4D-LUT structure for color adjustment
+# Simple Time Considered Tone Mapping Block for color adjustment
 # used in the UNet architecture.
 
 @persistence.persistent_class
 class TimedToneMappingBlock(torch.nn.Module):
-    def __init__(self, num_channels, scale=16):
+    def __init__(self, num_channels,emb_channels,eps=1e-6):
         super().__init__()
         self.Conv_3x3 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=3, bias=True, up=False, down=False,
                                 resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
         self.Conv_1x1 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=1, bias=True, up=False, down=False, 
                              resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
-        
+        self.affine = Linear(in_features=emb_channels, out_features=num_channels*2, init_mode='xavier_uniform')
+        self.norm1 = GroupNorm(num_channels=num_channels, eps=eps)
+
     def forward(self, x, t_embeded):
+        
+        params = self.affine(t_embeded).unsqueeze(2).unsqueeze(3).to(x.dtype)
+        x = silu(self.norm1(x.add_(params)))
         x = self.Conv_3x3(x)
-        t_embeded
+        x = self.Conv_1x1(x)
+        # x = silu(x)
 
         return x
 
+#----------------------------------------------------------------------------
+# 4D-LUT structure for color adjustment
+# used in the UNet architecture.
 
+@persistence.persistent_class
+class FourDLUT(torch.nn.Module):
+    def __init__(self, num_channels,emb_channels,eps=1e-6):
+        super().__init__()
+        self.Conv_3x3 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=3, bias=True, up=False, down=False,
+                                resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
+        self.Conv_1x1 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=1, bias=True, up=False, down=False, 
+                             resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
+        self.affine = Linear(in_features=emb_channels, out_features=num_channels*2, init_mode='xavier_uniform')
+        self.norm1 = GroupNorm(num_channels=num_channels, eps=eps)
+
+    def forward(self, x, t_embeded):
+        
+        params = self.affine(t_embeded).unsqueeze(2).unsqueeze(3).to(x.dtype)
+        x = silu(self.norm1(x.add_(params)))
+        x = self.Conv_3x3(x)
+        x = self.Conv_1x1(x)
+        # x = silu(x)
+
+        return x
 #----------------------------------------------------------------------------
 # Reimplementation of the DDPM++ and NCSN++ architectures from the paper
 # "Score-Based Generative Modeling through Stochastic Differential
@@ -292,10 +321,12 @@ class JinSongUNet(torch.nn.Module):
         self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
         self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
+        
+        self.raw_gamma = torch.nn.Parameter(data=torch.tensor(1./2.2,), requires_grad=True)
 
         # Encoder.
         self.enc = torch.nn.ModuleDict()
-        cout = 6 # in_channels
+        cout = 9 # in_channels
         caux = in_channels
         for level, mult in enumerate(channel_mult):
             res = img_resolution >> level
@@ -339,6 +370,7 @@ class JinSongUNet(torch.nn.Module):
                 self.dec[f'{res}x{res}_aux_conv'] = Conv2d(in_channels=cout, out_channels=out_channels, kernel=3, **init_zero)
 
     def forward(self, x, noise_labels, any_labels, augment_labels=None):
+        
         # Mapping.
         emb = self.map_noise(noise_labels)
         emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
@@ -348,14 +380,17 @@ class JinSongUNet(torch.nn.Module):
                 tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(x.dtype)
             # emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
             tmp = tmp.to(x.dtype)
+            gamma = torch.sigmoid(self.raw_gamma.to(x.device).to(x.dtype))
+            tmp_gamma = ((tmp + 1)/2.)**gamma * 2. - 1.
+            # tmp_sharp = torchvision.transforms.functional.adjust_sharpness((tmp_gamma + 1)/2., 2.0)*2. - 1.
         if self.map_augment is not None and augment_labels is not None:
             emb = emb + self.map_augment(augment_labels)
         emb = silu(self.map_layer0(emb))
         emb = silu(self.map_layer1(emb))
-
+        
         # Encoder.
         skips = []
-        x = torch.cat([x, tmp], dim=1)
+        x = torch.cat([x, tmp,tmp_gamma], dim=1)
         aux = x
         for name, block in self.enc.items():
             if 'aux_down' in name:

@@ -339,6 +339,7 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
         preds = (images * 127.5 + 128).clip(0, 255)
         mse = torch.mean((preds-gt_images)**2,dim=(1,2,3))
         psnr = 10*torch.log10(255*255/mse)
+        print(psnr.shape)
         psnr_list.append(psnr)
         # Save images.
         images_np = preds.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
@@ -346,10 +347,10 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
         labels_np = (labels * 127.5 + 128).clip(0,255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         print("batch_seeds",batch_seeds)
         print("img_count",img_count)
-        for seed, image_np,gt_image_np,label_np in zip(batch_seeds, images_np,gt_images_np, labels_np):
+        for seed, image_np,gt_image_np,label_np,current_psnr in zip(batch_seeds, images_np,gt_images_np, labels_np, psnr):
             image_dir = os.path.join(outdir, f'{seed:06d}') if subdirs else outdir
             os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{seed:06d}-predTR.png')
+            image_path = os.path.join(image_dir, f'{seed:06d}-predTR-{current_psnr:.2f}.png')
             gt_image_path = os.path.join(image_dir, f'{seed:06d}-gt.png')
             label_path = os.path.join(image_dir, f'{seed:06d}-label.png')
             if image_np.shape[2] == 1:
@@ -361,8 +362,8 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
                 # print((label_np-gt_image_np).mean())
         img_count += batch_size
 
-    print(torch.stack(psnr_list))
-    mean_psnr = torch.mean(torch.stack(psnr_list))
+    print(torch.cat(psnr_list)) 
+    mean_psnr = torch.mean(torch.cat(psnr_list))
     print(f"mean_psnr:{mean_psnr}")
     # Done.
     torch.distributed.barrier()
