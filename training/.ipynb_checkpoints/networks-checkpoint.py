@@ -322,7 +322,7 @@ class JinSongUNet(torch.nn.Module):
         self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
         
-        self.raw_gamma = torch.nn.Parameter(data=torch.tensor(1./1.8,), requires_grad=True)
+        self.raw_gamma = torch.nn.Parameter(data=torch.tensor(1./2.2,), requires_grad=True)
         
         self.timed_tone_mapping_block = TimedToneMappingBlock(num_channels=6,emb_channels=emb_channels,eps=1e-6)
         
@@ -382,9 +382,8 @@ class JinSongUNet(torch.nn.Module):
                 tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(x.dtype)
             # emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
             tmp = tmp.to(x.dtype)
-            gamma = self.raw_gamma.to(x.device).to(x.dtype)
+            gamma = torch.sigmoid(self.raw_gamma.to(x.device).to(x.dtype))
             tmp_gamma = ((tmp + 1)/2.)**gamma * 2. - 1.
-            tmp_gamma = torchvision.transforms.functional.adjust_saturation((tmp_gamma + 1)/2., 2.0)*2. - 1.
             # tmp_sharp = torchvision.transforms.functional.adjust_sharpness((tmp_gamma + 1)/2., 2.0)*2. - 1.
         if self.map_augment is not None and augment_labels is not None:
             emb = emb + self.map_augment(augment_labels)
@@ -422,8 +421,7 @@ class JinSongUNet(torch.nn.Module):
                     x = torch.cat([x, skips.pop()], dim=1)
                 x = block(x, emb)
         luminace_map = self.timed_tone_mapping_block(torch.cat([tmp,tmp_gamma],dim=1),emb)
-        aux = 0.2*luminace_map * aux + 0.8*aux
-        
+        aux = aux + luminace_map * aux
         return aux
 
 #----------------------------------------------------------------------------

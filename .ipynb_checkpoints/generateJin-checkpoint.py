@@ -292,7 +292,6 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
     img_count=0
     
     psnr_list=[]
-    psnr_label_gamma_list=[]
     last_gt = 0
     for item in tqdm.tqdm(dataloader, unit='batch', disable=(dist.get_rank() != 0)):
     # for item in dataloader:
@@ -336,46 +335,36 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
         images = sampler_fn(net, latents, labels, randn_like=rnd.randn_like, **sampler_kwargs)
-        labels_gamma = transforms.functional.adjust_saturation(((labels + 1)/2.)**net.model.raw_gamma, 2.0)*2. - 1. 
-
-
+        
         preds = (images * 127.5 + 128).clip(0, 255)
         mse = torch.mean((preds-gt_images)**2,dim=(1,2,3))
         psnr = 10*torch.log10(255*255/mse)
+        # print(psnr.shape)
         psnr_list.append(psnr)
-        
-        labels_gamma_mse = torch.mean(((labels_gamma* 127.5 + 128).clip(0, 255)-gt_images)**2,dim=(1,2,3))
-        psnr_labels_gamma = 10*torch.log10(255*255/labels_gamma_mse)
-        psnr_label_gamma_list.append(psnr_labels_gamma)
-
         # Save images.
         images_np = preds.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         gt_images_np = gt_images.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         labels_np = (labels * 127.5 + 128).clip(0,255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        labels_gamma_np = (labels_gamma * 127.5 + 128).clip(0,255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
         # print("batch_seeds",batch_seeds)
         # print("img_count",img_count)
-        for seed, image_np,gt_image_np,label_np,label_gamma_np,current_psnr_label_gamma,current_psnr in zip(batch_seeds, images_np,gt_images_np, labels_np,labels_gamma_np,psnr_labels_gamma, psnr):
+        for seed, image_np,gt_image_np,label_np,current_psnr in zip(batch_seeds, images_np,gt_images_np, labels_np, psnr):
             image_dir = os.path.join(outdir, f'{seed:06d}') if subdirs else outdir
             os.makedirs(image_dir, exist_ok=True)
             image_path = os.path.join(image_dir, f'{seed:06d}-predTTM-{current_psnr:.2f}.png')
             gt_image_path = os.path.join(image_dir, f'{seed:06d}-gt.png')
             label_path = os.path.join(image_dir, f'{seed:06d}-label.png')
-            label_gamma_path = os.path.join(image_dir, f'{seed:06d}-label_gamma{current_psnr_label_gamma:.2f}.png')
             if image_np.shape[2] == 1:
                 PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
             else:
                 PIL.Image.fromarray(image_np, 'RGB').save(image_path)
                 PIL.Image.fromarray(gt_image_np, 'RGB').save(gt_image_path)
                 PIL.Image.fromarray(label_np, 'RGB').save(label_path)
-                PIL.Image.fromarray(label_gamma_np, 'RGB').save(label_gamma_path)
                 # print((label_np-gt_image_np).mean())
         img_count += batch_size
 
     print(torch.cat(psnr_list)) 
     mean_psnr = torch.mean(torch.cat(psnr_list))
     print(f"mean_psnr:{mean_psnr}")
-    print(f"mean_psnr_label_gamma:{torch.mean(torch.cat(psnr_label_gamma_list))}")  
     # Done.
     torch.distributed.barrier()
     dist.print0('Done.')

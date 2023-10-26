@@ -245,7 +245,11 @@ class ImageFolderDataset(Dataset):
     
     def open_label_file(self, fname):
         if self._type == 'dir':
-            return open(os.path.join(self._path.replace('Normal', 'Low'), fname), 'rb')
+            if 'LOL-v2' in self._path and 'Normal' in self._path:
+                return open(os.path.join(self._path.replace('Normal', 'Low'), fname), 'rb')
+            elif 'LOLdataset' in self._path and 'high' in self._path:
+                # print(os.path.join(self._path.replace('high', 'low'), fname))
+                return open(os.path.join(self._path.replace('high', 'low'), fname), 'rb')
         if self._type == 'zip':
             return self._get_zipfile().open(fname, 'r')
         return None
