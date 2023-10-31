@@ -336,7 +336,7 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
         images = sampler_fn(net, latents, labels, randn_like=rnd.randn_like, **sampler_kwargs)
-        labels_gamma = transforms.functional.adjust_saturation(((labels + 1)/2.)**net.model.raw_gamma, 2.0)*2. - 1. 
+        labels_gamma = transforms.functional.adjust_saturation(((labels + 1)/2.)**net.model.raw_gamma, 1.5)*2. - 1. 
 
 
         preds = (images * 127.5 + 128).clip(0, 255)
@@ -361,7 +361,7 @@ def main(network_pkl, outdir, data, subdirs, seeds,resize_res,gamma_correction, 
             image_path = os.path.join(image_dir, f'{seed:06d}-predTTM-{current_psnr:.2f}.png')
             gt_image_path = os.path.join(image_dir, f'{seed:06d}-gt.png')
             label_path = os.path.join(image_dir, f'{seed:06d}-label.png')
-            label_gamma_path = os.path.join(image_dir, f'{seed:06d}-label_gamma{current_psnr_label_gamma:.2f}.png')
+            label_gamma_path = os.path.join(image_dir, f'{seed:06d}-label_gamma.png')
             if image_np.shape[2] == 1:
                 PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
             else:

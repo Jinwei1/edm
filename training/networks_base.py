@@ -102,8 +102,6 @@ class GroupNorm(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.zeros(num_channels))
 
     def forward(self, x):
-        # print("x shape:",x.shape)
-        # print(self.num_groups)
         x = torch.nn.functional.group_norm(x, num_groups=self.num_groups, weight=self.weight.to(x.dtype), bias=self.bias.to(x.dtype), eps=self.eps)
         return x
 
@@ -226,57 +224,27 @@ class FourierEmbedding(torch.nn.Module):
 # Simple Time Considered Tone Mapping Block for color adjustment
 # used in the UNet architecture.
 
-# @persistence.persistent_class
-# class TimedToneMappingBlock(torch.nn.Module):
-#     def __init__(self, num_channels,emb_channels,eps=1e-6):
-#         super().__init__()
-#         self.Conv0_3x3 = Conv2d(in_channels=num_channels, out_channels=6, kernel=3, bias=True, up=False, down=False,
-#                                 resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
-#         self.affine = Linear(in_features=emb_channels, out_features=6, init_mode='xavier_uniform')
-#         self.norm1 = GroupNorm(num_channels=6, eps=eps)
-#         self.Conv1_3x3 = Conv2d(in_channels=6, out_channels=3, kernel=3, bias=True, up=False, down=False, 
-#                              resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
-#         self.Conv3_1x1 = Conv2d(in_channels=3, out_channels=3, kernel=1, bias=True, up=False, down=False, 
-#                              resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
-        
-        
-        
-
-#     def forward(self, x, t_embeded):
-        
-#         params = self.affine(t_embeded).unsqueeze(2).unsqueeze(3).to(x.dtype)
-#         x = self.Conv0_3x3(x)
-#         x = x.add_(params)
-#         x = silu(self.norm1(x))
-#         x = self.Conv1_3x3(x)
-#         x = self.Conv3_1x1(x)
-
-#         return x
-
-#----------------------------------------------------------------------------
-# Simple Time Considered Tone Mapping Block for color adjustment
-# used in the UNet architecture.
-
 @persistence.persistent_class
 class TimedToneMappingBlock(torch.nn.Module):
     def __init__(self, num_channels,emb_channels,eps=1e-6):
         super().__init__()
-        self.Conv0_3x3 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=3, bias=True, up=False, down=False,
+        self.Conv_3x3 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=3, bias=True, up=False, down=False,
                                 resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
-        self.Conv1_3x3 = Conv2d(in_channels=num_channels, out_channels=3, kernel=3, bias=True, up=False, down=False, 
+        self.Conv_1x1 = Conv2d(in_channels=num_channels, out_channels=num_channels, kernel=1, bias=True, up=False, down=False, 
                              resample_filter=[1,1], fused_resample=False, init_mode='kaiming_normal', init_weight=1, init_bias=0)
-        self.affine = Linear(in_features=emb_channels, out_features=6, init_mode='xavier_uniform')
+        self.affine = Linear(in_features=emb_channels, out_features=num_channels*2, init_mode='xavier_uniform')
         self.norm1 = GroupNorm(num_channels=num_channels, eps=eps)
 
     def forward(self, x, t_embeded):
         
         params = self.affine(t_embeded).unsqueeze(2).unsqueeze(3).to(x.dtype)
-        x = self.Conv0_3x3(x)
         x = silu(self.norm1(x.add_(params)))
-        x = self.Conv1_3x3(x)
+        x = self.Conv_3x3(x)
+        x = self.Conv_1x1(x)
         # x = silu(x)
 
         return x
+
 #----------------------------------------------------------------------------
 # 4D-LUT structure for color adjustment
 # used in the UNet architecture.
@@ -355,12 +323,10 @@ class JinSongUNet(torch.nn.Module):
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
         
         self.raw_gamma = torch.nn.Parameter(data=torch.tensor(1./2.2,), requires_grad=True)
-        
-        self.timed_tone_mapping_block = TimedToneMappingBlock(num_channels=6,emb_channels=emb_channels,eps=1e-6)
-        
+
         # Encoder.
         self.enc = torch.nn.ModuleDict()
-        cout =9 # in_channels
+        cout = 9 # in_channels
         caux = in_channels
         for level, mult in enumerate(channel_mult):
             res = img_resolution >> level
@@ -414,11 +380,9 @@ class JinSongUNet(torch.nn.Module):
                 tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(x.dtype)
             # emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
             tmp = tmp.to(x.dtype)
-            gamma = self.raw_gamma.to(x.device).to(x.dtype)
-            gamma = torch.sigmoid(gamma)
+            gamma = torch.sigmoid(self.raw_gamma.to(x.device).to(x.dtype))
             tmp_gamma = ((tmp + 1)/2.)**gamma * 2. - 1.
-            # tmp_sat = torchvision.transforms.functional.adjust_saturation((tmp_gamma + 1)/2., 1.5)*2. - 1.
-            # tmp_sharp = torchvision.transforms.functional.adjust_sharpness((tmp_gamma + 1)/2., 1.5)*2. - 1.
+            # tmp_sharp = torchvision.transforms.functional.adjust_sharpness((tmp_gamma + 1)/2., 2.0)*2. - 1.
         if self.map_augment is not None and augment_labels is not None:
             emb = emb + self.map_augment(augment_labels)
         emb = silu(self.map_layer0(emb))
@@ -454,10 +418,8 @@ class JinSongUNet(torch.nn.Module):
                 if x.shape[1] != block.in_channels:
                     x = torch.cat([x, skips.pop()], dim=1)
                 x = block(x, emb)
-        luminace_map = self.timed_tone_mapping_block(torch.cat([tmp,tmp_gamma],dim=1),emb)
-        aux = luminace_map * aux + aux
-        
-        return aux 
+        return aux
+
 #----------------------------------------------------------------------------
 # Modify the above Rimplementation of the ADM architecture from the paper
 # "Diffusion Models Beat GANS on Image Synthesis". 
